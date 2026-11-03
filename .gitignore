@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+vendor/
+composer.phar
+credentials.json
+token*.json
+secure-data/
+sftp-config.json
