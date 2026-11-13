@@ -1862,8 +1862,8 @@ final class GoogleAdsService
             $segments = $row->hasSegments() ? $row->getSegments() : null;
             $keyword = null;
             $keywordMatch = null;
-            if ($segments !== null && $segments->hasKeyword()) {
-                $info = $segments->getKeyword();
+            if ($segments !== null && $segments->hasKeyword() && $segments->getKeyword()->hasInfo()) {
+                $info = $segments->getKeyword()->getInfo();
                 $keyword = $info->hasText() ? $info->getText() : null;
                 $keywordMatch = self::enumNome(KeywordMatchType::class, $info->getMatchType());
             }
