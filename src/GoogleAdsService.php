@@ -290,9 +290,7 @@ final class GoogleAdsService
           campaign.id,
           campaign.bidding_strategy_type,
           campaign.maximize_conversions.target_cpa_micros,
-          campaign.maximize_conversions.cpc_bid_ceiling_micros,
           campaign.maximize_conversion_value.target_roas,
-          campaign.maximize_conversion_value.cpc_bid_ceiling_micros,
           campaign.target_cpa.target_cpa_micros,
           campaign.target_cpa.cpc_bid_ceiling_micros,
           campaign.target_roas.target_roas,
@@ -570,6 +568,7 @@ final class GoogleAdsService
     private const GAQL_LOCALIZACOES = <<<'GAQL'
         SELECT
           campaign.id,
+          campaign.status,
           geographic_view.location_type,
           geographic_view.country_criterion_id,
           segments.geo_target_most_specific_location,
@@ -584,6 +583,25 @@ final class GoogleAdsService
         WHERE campaign.status = 'ENABLED'
           AND segments.date BETWEEN '{{INICIO}}' AND '{{FIM}}'
           AND metrics.cost_micros > 0
+        GAQL;
+
+    private const GAQL_CIDADES = <<<'GAQL'
+        SELECT
+          campaign.id,
+          campaign.status,
+          segments.geo_target_city,
+          segments.geo_target_region,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value,
+          metrics.all_conversions,
+          metrics.all_conversions_value
+        FROM user_location_view
+        WHERE campaign.status = 'ENABLED'
+          AND segments.date BETWEEN '{{INICIO}}' AND '{{FIM}}'
+          AND metrics.impressions > 0
         GAQL;
 
     private const GAQL_LOCAIS = <<<'GAQL'
@@ -802,6 +820,7 @@ final class GoogleAdsService
         $this->marcarProgramacao($campanhas, $consultas['programacao']['erro'] === null);
         $this->anexarLocais($campanhas, $consultas['locais_configurados']['linhas']);
         $this->anexarLocalizacoes($campanhas, $consultas['localizacoes']['linhas']);
+        $this->anexarCidades($campanhas, $consultas['cidades']['linhas']);
         $this->anexarPublicos($campanhas, $consultas['publicos']['linhas']);
         $geoErros = $this->aplicarGeografia($campanhas);
 
@@ -979,6 +998,7 @@ final class GoogleAdsService
             'generos' => $this->consultar('generos', self::comPeriodo(self::GAQL_GENEROS, $atual)),
             'faixas_renda' => $this->consultar('faixas_renda', self::comPeriodo(self::GAQL_RENDAS, $atual)),
             'localizacoes' => $this->consultar('localizacoes', self::comPeriodo(self::GAQL_LOCALIZACOES, $atual)),
+            'cidades' => $this->consultar('cidades', self::comPeriodo(self::GAQL_CIDADES, $atual)),
             'locais_configurados' => $this->consultar('locais_configurados', self::GAQL_LOCAIS),
             'publicos' => $this->consultar('publicos', self::comPeriodo(self::GAQL_PUBLICOS, $atual)),
         ];
@@ -1164,6 +1184,7 @@ final class GoogleAdsService
             'generos' => [],
             'faixas_renda' => [],
             'localizacoes' => [],
+            'cidades' => [],
             'locais_configurados' => [],
             'publicos' => [],
             'campos_ausentes' => [],
@@ -2032,6 +2053,50 @@ final class GoogleAdsService
     }
 
     /**
+     * Cidade física de quem viu o anúncio. Não usa o CEP: somar CEP e cidade
+     * contaria o mesmo clique duas vezes.
+     *
+     * @param array<int, array<string, mixed>> $campanhas
+     * @param list<GoogleAdsRow> $linhas
+     */
+    private function anexarCidades(array &$campanhas, array $linhas): void
+    {
+        $acumulado = [];
+        foreach ($linhas as $row) {
+            if (!$row->hasCampaign() || !$row->hasMetrics() || !$row->hasSegments()) {
+                continue;
+            }
+            $segmentos = $row->getSegments();
+            $cityId = $segmentos->hasGeoTargetCity() ? self::idRecurso($segmentos->getGeoTargetCity()) : null;
+            $regionId = $segmentos->hasGeoTargetRegion() ? self::idRecurso($segmentos->getGeoTargetRegion()) : null;
+            if ($cityId === null && $regionId === null) {
+                continue;
+            }
+            $id = (int) $row->getCampaign()->getId();
+            $campanhas[$id] ??= $this->campanhaBase($row);
+            $chave = $id . '|' . ($cityId ?? 0) . '|' . ($regionId ?? 0);
+            $acumulado[$chave] ??= [
+                'id' => $id,
+                'city_id' => $cityId,
+                'region_id' => $regionId,
+                'bruto' => self::brutoVazio(),
+            ];
+            self::somarBruto($acumulado[$chave]['bruto'], $this->brutos($row->getMetrics()));
+        }
+
+        foreach ($acumulado as $item) {
+            $campanhas[$item['id']]['cidades'][] = [
+                'city_id' => $item['city_id'],
+                'region_id' => $item['region_id'],
+                'city' => null,
+                'region' => null,
+                'region_canonical' => null,
+                'country_code' => null,
+            ] + self::fecharMetricas($item['bruto']);
+        }
+    }
+
+    /**
      * @param array<int, array<string, mixed>> $campanhas
      * @param list<GoogleAdsRow> $linhas
      */
@@ -2080,6 +2145,13 @@ final class GoogleAdsService
                     $ids[] = (int) $linha['geo_id'];
                 }
             }
+            foreach ($campanha['cidades'] as $linha) {
+                foreach (['city_id', 'region_id'] as $campo) {
+                    if (($linha[$campo] ?? null) !== null) {
+                        $ids[] = (int) $linha[$campo];
+                    }
+                }
+            }
         }
         $ids = array_values(array_unique($ids));
         if ($ids === []) {
@@ -2105,6 +2177,23 @@ final class GoogleAdsService
                 $local['country_code'] = ($info['country_code'] ?? '') !== '' ? $info['country_code'] : null;
             }
             unset($local);
+            foreach ($campanha['cidades'] as &$cidade) {
+                $infoCidade = self::geoInfo($nomes, $cidade['city_id']);
+                $infoRegiao = self::geoInfo($nomes, $cidade['region_id']);
+                $cidade['city'] = $infoCidade === null || ($infoCidade['name'] ?? '') === '' ? null : $infoCidade['name'];
+                $cidade['region'] = $infoRegiao === null || ($infoRegiao['name'] ?? '') === '' ? null : $infoRegiao['name'];
+                $cidade['region_canonical'] = $infoRegiao === null || ($infoRegiao['canonical_name'] ?? '') === ''
+                    ? null
+                    : $infoRegiao['canonical_name'];
+                $pais = '';
+                if ($infoRegiao !== null && ($infoRegiao['country_code'] ?? '') !== '') {
+                    $pais = $infoRegiao['country_code'];
+                } elseif ($infoCidade !== null && ($infoCidade['country_code'] ?? '') !== '') {
+                    $pais = $infoCidade['country_code'];
+                }
+                $cidade['country_code'] = $pais !== '' ? $pais : null;
+            }
+            unset($cidade);
         }
         unset($campanha);
 
