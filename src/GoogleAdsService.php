@@ -733,9 +733,9 @@ final class GoogleAdsService
      *
      * @return array<string, mixed>
      */
-    public function relatorioDesempenho(): array
+    public function relatorioDesempenho(?array $periodos = null): array
     {
-        $periodos = self::periodos();
+        $periodos = self::normalizarPeriodos($periodos ?? self::periodos());
         $fim = $periodos['atual'][1];
         $consultas = $this->consultasDesempenho($periodos);
         $historico = $this->consultarAnos('historico_campanha', self::GAQL_HISTORICO, $fim);
@@ -880,6 +880,44 @@ final class GoogleAdsService
         }
 
         return new GoogleAdsApiException($exception->getRequestId(), $errors, $exception);
+    }
+
+    /**
+     * Aceita só datas Y-m-d reais. O valor entra na GAQL por substituição.
+     *
+     * @param array<string, mixed> $periodos
+     * @return array{atual: array{0: string, 1: string}, anterior: array{0: string, 1: string}}
+     */
+    private static function normalizarPeriodos(array $periodos): array
+    {
+        $saida = [];
+        foreach (['atual', 'anterior'] as $chave) {
+            if (!isset($periodos[$chave][0], $periodos[$chave][1])) {
+                throw new \InvalidArgumentException('Período do Google Ads incompleto.');
+            }
+            $saida[$chave] = [
+                self::dataGaql($periodos[$chave][0]),
+                self::dataGaql($periodos[$chave][1]),
+            ];
+        }
+
+        return $saida;
+    }
+
+    /**
+     * @param mixed $valor
+     */
+    private static function dataGaql($valor): string
+    {
+        if (!is_string($valor) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $valor)) {
+            throw new \InvalidArgumentException('Data do Google Ads inválida.');
+        }
+        $data = DateTimeImmutable::createFromFormat('!Y-m-d', $valor, new DateTimeZone('America/Sao_Paulo'));
+        if ($data === false || $data->format('Y-m-d') !== $valor) {
+            throw new \InvalidArgumentException('Data do Google Ads inválida.');
+        }
+
+        return $valor;
     }
 
     /**
